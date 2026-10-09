@@ -1,11 +1,13 @@
-# Discovery Engine V0.2
+# Discovery Engine V1
 
 เครื่องยนต์ค้นพบแบบ event-sourced ไม่มี LLM ในวงจร ใช้ simulation เป็นผู้ตัดสิน
 เป้าหมายของ V0: ค้นพบ phase transition (Tc, เลขชี้กำลัง) เอง โดยไม่ถูกบอกค่า
 
-มี 2 โจทย์ รันต่อกันในแต่ละรอบ:
+มี 3 โจทย์ รันต่อกันในแต่ละรอบ:
 - `ising` : Ising 2 มิติ (โจทย์ที่ใช้ปรับเกณฑ์ตอนสร้างระบบ) ผลอยู่ใน `report.md`
 - `potts3`: Potts q=3 (held-out: ระบบไม่เคยถูกปรับด้วยโจทย์นี้) ผลอยู่ใน `report-potts3.md`
+- `pca`   : ระบบลองกฎ cellular automaton ที่มีสัญญาณรบกวน 32 แบบเอง แล้วบอกว่ากฎไหนมีจุดเปลี่ยนสถานะ
+            และเข้ากับตระกูลที่รู้จักหรือไม่ ผลอยู่ใน `report-pca.md` (รอบแรกใช้เวลานานกว่าโจทย์อื่น)
 
 ## เริ่มจากมือถือ (ไม่มีค่าใช้จ่าย)
 
@@ -17,7 +19,7 @@
 3. แท็บ Actions > discovery-worker > Run workflow
 4. รอจบ แล้วเปิด `report.md` และ `report-potts3.md` ใน repo; รันซ้ำเพื่อให้ระบบเลือกการทดลองรอบถัดไป
    (ตั้งให้รันเองทุก 6 ชั่วโมงอยู่แล้ว)
-5. ถ้าอัปเดตจาก V0: ทับ `engine.py` และ `.github/workflows/worker.yml` ได้เลย
+5. ถ้าอัปเดตจากเวอร์ชันก่อน: ทับ `engine.py` และ `.github/workflows/worker.yml` ได้เลย
    state เดิมของ Ising ใช้ต่อได้ (job เดิมไม่ถูกรันซ้ำ)
 
 ## แต่ละรอบทำอะไร
@@ -39,9 +41,9 @@ state ทั้งหมดอยู่ใน `state/events.jsonl` (hash chain, 
     python engine.py selftest          # ใช้เวลาไม่กี่นาที
     python engine.py selftest --quick  # เวอร์ชันสั้น
 
-ตรวจ 8 ข้อ: hash chain จับการแก้ไข, ผลซ้ำได้, kill -9 แล้ว resume, engine สองตัวตรงกัน,
+ตรวจ 10 ข้อ: hash chain จับการแก้ไข, ผลซ้ำได้, kill -9 แล้ว resume, engine สองตัวตรงกัน,
 null battery (ระบบที่ไม่มี transition ต้องไม่ถูกบอกว่ามี), planted law (J=1.5 แล้ว Tc ต้องเลื่อนตาม),
-known answer (ค้นพบ Tc และเลขชี้กำลังใกล้ค่าที่รู้) และ held-out Potts q=3
+known answer (ค้นพบ Tc และเลขชี้กำลังใกล้ค่าที่รู้) held-out Potts q=3 และกฎ CA (engine ที่สองตรงกัน, กฎที่ไม่มีทางเรียงตัวต้องไม่ถูกบอกว่ามีจุดเปลี่ยน)
 
 ## ข้อจำกัดของ V0 (ตั้งใจให้ชัด)
 

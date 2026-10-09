@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Discovery Engine V0 -- event-sourced, resumable, no LLM anywhere.
 
-Missions (env DE_MISSION): ising (default) | potts3. State lives in ./state for ising and
+Missions (env DE_MISSION): ising (default) | potts3 | pca. State lives in ./state for ising and
 ./state-<mission> otherwise (override with DE_STATE). Commands:
   plan       decide the next experiments and enqueue them (logged with a reason)
   work       run queued jobs; safe to kill at any moment, resume by running again
@@ -32,6 +32,10 @@ MISSIONS = {
                "coarse": [round(0.7 + 0.05 * k, 4) for k in range(13)], "span": 0.1,
                "r2": (0.7, 1.0, 1.3), "known": (1.0 / math.log(1.0 + math.sqrt(3.0)), 26.0 / 15.0, 2.0 / 15.0)},
 }
+RULES = list(range(32))  # symmetric totalistic noisy-CA family: 5 free bits
+MISSIONS["pca"] = {"label": "noisy CA family (32 symmetric rules)", "sub": "pca", "q": None, "multi": True,
+                   "coarse": [round(0.025 * k, 4) for k in range(1, 17)], "span": 0.06, "divT": False,
+                   "budget": {8: (200, 2000), 16: (300, 3000), 32: (400, 4000)}, "known": None}
 MISSION = os.environ.get("DE_MISSION", "ising")
 M = MISSIONS[MISSION]
 STATE = os.environ.get("DE_STATE", "state" if MISSION == "ising" else f"state-{MISSION}")
@@ -172,12 +176,14 @@ def project(events):
     return jobs
 
 
-def make_spec(J, L, T, seed, engine="fast"):
-    burn, sweeps = BUDGET.get(L, (500, 5000))
+def make_spec(J, L, T, seed, engine="fast", rule=None):
+    burn, sweeps = M.get("budget", BUDGET).get(L, (500, 5000))
     spec = {"sub": M["sub"], "engine": engine, "J": J, "L": L, "T": round(float(T), 4),
             "seed": seed, "burn": burn, "sweeps": sweeps}
     if M["q"]:
         spec["q"] = M["q"]
+    if rule is not None:
+        spec["rule"] = rule
     return spec
 
 
@@ -344,8 +350,65 @@ def sim_potts_ref(L, T, J, burn, sweeps, rng, q):
     return e, m
 
 
+def pca_table(rule):
+    """Rule code 0..31 = new state of a 0-cell given n=0..4 neighbours equal to 1.
+    The 1-cell half is fixed by 0<->1 symmetry: new1(n) = 1 - new0(4 - n)."""
+    t0 = [(rule >> n) & 1 for n in range(5)]
+    return t0, [1 - t0[4 - n] for n in range(5)]
+
+
+def rule_text(rule):
+    return "".join(str(b) for b in pca_table(rule)[0])
+
+
+def _pca_obs(s):
+    n = s.size
+    eq = int((s == np.roll(s, -1, 0)).sum()) + int((s == np.roll(s, -1, 1)).sum())
+    return -eq / n, 2.0 * float(s.sum()) / n - 1.0
+
+
+def sim_pca(L, p, J, burn, sweeps, rng, rule):
+    """Synchronous noisy cellular automaton. p = probability each cell is flipped after the rule."""
+    t0, t1 = pca_table(rule)
+    tab = np.array([t0, t1], dtype=np.int8)
+    s = np.ones((L, L), dtype=np.int8)
+    e, m = np.empty(sweeps), np.empty(sweeps)
+    for t in range(burn + sweeps):
+        n = np.roll(s, 1, 0) + np.roll(s, -1, 0) + np.roll(s, 1, 1) + np.roll(s, -1, 1)
+        s = tab[s, n] ^ (rng.random((L, L)) < p).astype(np.int8)
+        if t >= burn:
+            e[t - burn], m[t - burn] = _pca_obs(s)
+    return e, m
+
+
+def sim_pca_ref(L, p, J, burn, sweeps, rng, rule):
+    """Reference PCA engine: explicit loops over cells."""
+    t0, t1 = pca_table(rule)
+    tab = (t0, t1)
+    s = [[1] * L for _ in range(L)]
+    N = L * L
+    e, m = np.empty(sweeps), np.empty(sweeps)
+    for t in range(burn + sweeps):
+        u = rng.random(N).tolist()
+        new = [[0] * L for _ in range(L)]
+        k = 0
+        for i in range(L):
+            for j in range(L):
+                n = s[(i - 1) % L][j] + s[(i + 1) % L][j] + s[i][(j - 1) % L] + s[i][(j + 1) % L]
+                v = tab[s[i][j]][n]
+                new[i][j] = v ^ (1 if u[k] < p else 0)
+                k += 1
+        s = new
+        if t >= burn:
+            eq = sum((s[i][j] == s[(i + 1) % L][j]) + (s[i][j] == s[i][(j + 1) % L])
+                     for i in range(L) for j in range(L))
+            e[t - burn], m[t - burn] = -eq / N, 2.0 * sum(map(sum, s)) / N - 1.0
+    return e, m
+
+
 SIMS = {"fast": sim_fast, "ref": sim_ref, "null_iid": sim_null}
 POTTS = {"fast": sim_potts, "ref": sim_potts_ref}
+PCA = {"fast": sim_pca, "ref": sim_pca_ref}
 
 
 def tau_int(x):
@@ -377,7 +440,9 @@ def summarize(e, m, nblocks=10):
 def run_spec(spec):
     """Pure function: spec -> result. Seeded only by the spec itself (counter-based RNG)."""
     rng = np.random.Generator(np.random.Philox(key=int(sha(canon(spec))[:32], 16)))
-    if spec["sub"] == "potts":
+    if spec["sub"] == "pca":
+        e, m = PCA[spec["engine"]](spec["L"], spec["T"], spec["J"], spec["burn"], spec["sweeps"], rng, spec["rule"])
+    elif spec["sub"] == "potts":
         e, m = POTTS[spec["engine"]](spec["L"], spec["T"], spec["J"], spec["burn"], spec["sweeps"], rng, spec["q"])
     else:
         e, m = SIMS[spec["engine"]](spec["L"], spec["T"], spec["J"], spec["burn"], spec["sweeps"], rng)
@@ -394,13 +459,13 @@ def run_many(specs, parallel):
 
 
 # -------------------------------------------------------------- analysis
-def load_results(log, engine="fast", J=None, sub=None):
+def load_results(log, engine="fast", J=None, sub=None, rule=None):
     sub = sub or M["sub"]
     out = []
     for j in project(log.events).values():
         s = j["spec"]
         if (j["state"] == "done" and s["engine"] == engine and s["sub"] == sub
-                and (J is None or s["J"] == J)):
+                and (J is None or s["J"] == J) and (rule is None or s.get("rule") == rule)):
             out.append(log.get_artifact(j["artifact"]))
     return out
 
@@ -415,14 +480,15 @@ def pool_blocks(results):
     return g
 
 
-def curves(g, rng=None):
+def curves(g, rng=None, divT=True):
     """(T, chi, binder, |m|) per size. chi and binder are computed from generic moments."""
     out = {}
     for (L, T), d in sorted(g.items()):
         n = len(d["m2"])
         idx = np.arange(n) if rng is None else rng.integers(0, n, n)
         absm, m2, m4 = (float(np.asarray(d[k])[idx].mean()) for k in ("absm", "m2", "m4"))
-        out.setdefault(L, []).append((T, L * L * (m2 - absm ** 2) / T, 1 - m4 / (3 * m2 ** 2), absm))
+        out.setdefault(L, []).append((T, L * L * (m2 - absm ** 2) / (T if divT else 1.0),
+                                      1 - m4 / (3 * m2 ** 2), absm))
     return {L: np.array(v) for L, v in out.items()}
 
 
@@ -462,14 +528,14 @@ def estimate(cv):
             "edge": any(p[2] for p in peaks.values())}
 
 
-def analyze_results(results, B=100, seed=0):
+def analyze_results(results, B=100, seed=0, divT=True):
     g = pool_blocks(results)
-    est = estimate(curves(g))
+    est = estimate(curves(g, divT=divT))
     rng = np.random.default_rng(seed)
     boots = []
     for _ in range(B):
         try:
-            boots.append(estimate(curves(g, rng)))
+            boots.append(estimate(curves(g, rng, divT)))
         except (ValueError, np.linalg.LinAlgError):
             pass
 
@@ -485,8 +551,9 @@ def analyze_results(results, B=100, seed=0):
     return est
 
 
-def r2_check(log):
-    ref, fast = pool_blocks(load_results(log, "ref", 1.0)), pool_blocks(load_results(log, "fast", 1.0))
+def r2_check(log, rule=None):
+    ref = pool_blocks(load_results(log, "ref", 1.0, rule=rule))
+    fast = pool_blocks(load_results(log, "fast", 1.0, rule=rule))
     rows = []
     for (L, T), d in sorted(ref.items()):
         f = fast.get((L, T))
@@ -501,6 +568,8 @@ def r2_check(log):
 
 # ------------------------------------------------------------- selector
 def plan(log):
+    if M.get("multi"):
+        return plan_pca(log)
     jobs = project(log.events)
     if any(j["state"] in ("queued", "leased") and j["attempt"] < MAX_ATTEMPTS for j in jobs.values()):
         return "queue not empty; nothing to plan"
@@ -541,12 +610,99 @@ def plan(log):
     return f"{reason} [{n} jobs enqueued]"
 
 
+def pca_estimates(log, rules, B):
+    out = {}
+    for r in rules:
+        res = load_results(log, "fast", 1.0, rule=r)
+        if len({x["spec"]["L"] for x in res}) < 2:
+            continue
+        try:
+            out[r] = analyze_results(res, B=B, divT=False)
+        except (ValueError, np.linalg.LinAlgError):
+            out[r] = None  # degenerate data (e.g. constant order parameter)
+    return out
+
+
+def plan_pca(log):
+    """Selector for the rule-family mission: screen every rule, then spend effort only where
+    a transition candidate appears, then add seeds only where the exponent is still uncertain."""
+    jobs = project(log.events)
+    if any(j["state"] in ("queued", "leased") and j["attempt"] < MAX_ATTEMPTS for j in jobs.values()):
+        return "queue not empty; nothing to plan"
+    plans = [e["payload"] for e in log.events if e["type"] == "Plan"]
+    stage = max((p["stage"] for p in plans), default=0)
+    co, span = M["coarse"], M["span"]
+    flagged, temps, seed_max = [], {}, 1
+    if stage == 0:
+        specs = [make_spec(1.0, L, p, s, rule=r) for r in RULES for L in SIZES for p in co for s in range(2)]
+        reason = (f"stage 1 [{M['label']}]: no data yet -> screen all {len(RULES)} rules on a coarse noise grid "
+                  f"p={co[0]}..{co[-1]} (step {round(co[1] - co[0], 4)}), 3 sizes x 2 seeds each")
+    else:
+        last = [p for p in plans if p["stage"] == stage][-1]
+        if stage == 1:
+            est = pca_estimates(log, RULES, B=40)
+            flagged = sorted(r for r, e in est.items() if e and e["detected"])
+            if not flagged:
+                log.append("Plan", {"stage": 2, "reason": "stage 2: no rule passed screening -> nothing to refine",
+                                    "n_jobs": 0, "flagged": [], "temps": {}, "seed_max": 1})
+                return "no rule passed screening"
+            for r in flagged:
+                tp = est[r]["tp"]
+                temps[str(r)] = [round(min(0.5, max(0.005, float(x))), 4) for x in tp + np.linspace(-span, span, 11)]
+            specs = [make_spec(1.0, L, p, s, rule=r) for r in flagged for L in SIZES for p in temps[str(r)] for s in range(3)]
+            specs += [make_spec(1.0, 8, temps[str(r)][i], s, "ref", rule=r) for r in flagged for i in (0, 5, 10) for s in range(3)]
+            seed_max = 2
+            reason = (f"stage 2 [{M['label']}]: {len(flagged)} of {len(RULES)} rules show a transition signal "
+                      f"(rules {flagged}) -> refine +-{span} around each susceptibility peak and add reference-engine "
+                      f"jobs (R2); the other rules get no more compute")
+        else:
+            flagged, temps = last["flagged"], last["temps"]
+            est = pca_estimates(log, flagged, B=40)
+            nseed = last["seed_max"] + 1
+            wide = []
+            for r in flagged:
+                e = est.get(r)
+                lo, hi = e["ci"]["g_nu"] if e else (None, None)
+                if lo is not None and hi - lo > 0.7:
+                    wide.append(r)
+            if not wide or nseed >= 9:
+                return f"converged enough for this stage (rules still wide: {wide}, seeds={nseed}); nothing to add"
+            specs = [make_spec(1.0, L, p, s, rule=r) for r in wide for L in SIZES for p in temps[str(r)]
+                     for s in range(nseed, nseed + 3)]
+            seed_max = nseed + 2
+            reason = (f"stage {stage + 1} [{M['label']}]: exponent CI still wide for rules {wide} "
+                      f"-> 3 more seeds at their refined noise levels")
+    n = enqueue(log, specs)
+    log.append("Plan", {"stage": stage + 1, "reason": reason, "n_jobs": n, "flagged": flagged,
+                         "temps": temps, "seed_max": seed_max})
+    return f"{reason} [{n} jobs enqueued]"
+
+
+def classify_ising(est):
+    if est is None:
+        return "วิเคราะห์ไม่ได้ (ข้อมูลเสื่อม)"
+    if not est["detected"]:
+        return "ไม่พบจุดเปลี่ยน"
+    lo, hi = est["ci"]["g_nu"]
+    if lo is None or hi - lo > 1.2:
+        return "พบสัญญาณ แต่ข้อมูลยังไม่พอจัดกลุ่ม"
+    gok = abs(est["g_nu"] - 1.75) < 0.3
+    bok = est["b_nu"] is not None and abs(est["b_nu"] - 0.125) < 0.07
+    if gok and bok:
+        return "เข้ากับ Ising class"
+    if gok:
+        return "ใกล้ Ising (γ/ν ตรง, β/ν ต่างเล็กน้อย)"
+    return "ไม่เข้ากับ Ising class: ผู้สมัครที่ต้องตรวจเพิ่ม"
+
+
 # ---------------------------------------------------------------- report
 def fmt(x, nd=3):
     return "n/a" if x is None else f"{x:.{nd}f}"
 
 
 def write_report(log):
+    if M.get("multi"):
+        return write_report_pca(log)
     jobs = project(log.events)
     states = {}
     for j in jobs.values():
@@ -607,6 +763,59 @@ def write_report(log):
     if plans:
         lines += ["", "## ประวัติการเลือกการทดลอง"]
         lines += [f"- {p['reason']} ({p['n_jobs']} jobs)" for p in plans]
+    with open(REPORT, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    return REPORT
+
+
+def write_report_pca(log):
+    jobs = project(log.events)
+    states = {}
+    for j in jobs.values():
+        states[j["state"]] = states.get(j["state"], 0) + 1
+    ok, n = verify_chain(log.events)
+    plans = [e["payload"] for e in log.events if e["type"] == "Plan"]
+    lines = [f"# รายงาน Discovery Engine — {M['label']}", "",
+             f"สร้างเมื่อ {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} UTC · code `{code_hash()}`", "",
+             "ผลทั้งหมดนี้เป็นผลของ simulation ภายใต้ model และ assumption ด้านล่าง ไม่ใช่กฎของธรรมชาติ", "",
+             "## สถานะ",
+             f"- events {n} รายการ · hash chain: {'ผ่าน' if ok else 'ไม่ผ่าน'}",
+             "- jobs: " + ", ".join(f"{k} {v}" for k, v in sorted(states.items())), ""]
+    est = pca_estimates(log, RULES, B=60)
+    stage = max((p["stage"] for p in plans), default=0)
+    pending = any(j["state"] in ("queued", "leased") and j["attempt"] < MAX_ATTEMPTS for j in jobs.values())
+    final = stage >= 2 and not pending  # coarse-grid exponents are biased low; only classify after refinement
+    rows, counts = [], {}
+    for r in RULES:
+        e = est.get(r)
+        if r not in est:
+            continue
+        cls = classify_ising(e) if (final or not (e and e["detected"])) else "พบสัญญาณ รอการซูมเพิ่ม"
+        r2ok, r2rows = r2_check(log, r)
+        lvl = ""
+        if e and e["detected"]:
+            lvl = "L2 ชั่วคราว" if r2ok else "L1"
+        counts[cls] = counts.get(cls, 0) + 1
+        f = lambda x: "-" if x is None else f"{x:.3f}"
+        rows.append(f"| {r} | {rule_text(r)} | {f(e and e['tc'])} | {f(e and e['g_nu'])} | "
+                    f"{f(e and e['b_nu'])} | {lvl or '-'} | {cls} |")
+    lines += ["## สรุปแบบง่าย",
+              f"ระบบลองกฎ {len(est)} แบบ (กฎที่สมมาตรเมื่อสลับ 0 กับ 1) แล้วตรวจว่ากฎไหนมีจุดเปลี่ยนสถานะเมื่อเพิ่มสัญญาณรบกวน:"]
+    lines += [f"- {c}: {k} กฎ" for c, k in sorted(counts.items(), key=lambda x: -x[1])]
+    lines += ["", "ตาราง: รหัสกฎ · ตารางกฎ (เมื่อเซลล์เป็น 0 และเพื่อนบ้านเป็น 1 จำนวน 0..4 ตัว จะเปลี่ยนเป็นอะไร) · "
+              "สัญญาณรบกวน p ที่จุดเปลี่ยน · γ/ν · β/ν · ระดับ · การจัดกลุ่ม", "",
+              "| กฎ | ตาราง | p_c | γ/ν | β/ν | ระดับ | จัดกลุ่ม |", "|---|---|---|---|---|---|---|"]
+    lines += rows
+    lines += ["", "## ข้อควรรู้",
+              "- การจัดกลุ่มเทียบกับ Ising เท่านั้น (γ/ν = 1.75, β/ν = 0.125; เกณฑ์ |ต่าง| < 0.3 และ < 0.07)",
+              "- เท่าที่ผมทราบ กฎที่สมมาตรแบบนี้คาดว่าจะอยู่ใน Ising class (ข้อเสนอของ Grinstein และคณะ ปี 1985) "
+              "ดังนั้นผลที่เข้ากับ Ising คือการค้นพบซ้ำของสิ่งที่รู้แล้ว ไม่ใช่ของใหม่",
+              "- ผู้สมัครที่ \"ไม่เข้ากับ Ising\" ยังไม่ใช่การค้นพบ: อาจเกิดจากขนาดระบบเล็ก (L = 8, 16, 32), "
+              "ข้อมูลไม่พอ หรือลำดับแบบสลับที่ observable ชุดนี้วัดไม่ได้ ต้องตรวจซ้ำและให้มนุษย์ดู",
+              "- กฎที่ \"ไม่พบจุดเปลี่ยน\" หมายถึงไม่พบด้วย observable ชุดนี้ ไม่ได้พิสูจน์ว่าไม่มี",
+              "- R2 (engine ที่สอง) ทำเฉพาะกฎที่ผ่านการคัดกรอง ที่ L=8", "",
+              "## ประวัติการเลือกการทดลอง"]
+    lines += [f"- {p['reason']} ({p['n_jobs']} jobs)" for p in plans]
     with open(REPORT, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     return REPORT
@@ -737,6 +946,33 @@ def selftest(quick):
           and est["b_nu"] is not None and abs(est["b_nu"] - kb) < 0.07)
     check("held-out substrate Potts q=3: Tc, gamma/nu, beta/nu close to exact values", ok,
           f"(Tc {fmt(est['tc'])} vs {kt:.3f}; g/nu {fmt(est['g_nu'])} vs {kg:.3f}; b/nu {fmt(est['b_nu'])} vs {kb:.3f})")
+    # 9. rule-family substrate: second engine agrees on the majority rule
+    use_mission("pca")
+    r2log = Log(os.path.join(tmp, "pca_r2"))
+    sp = []
+    for p in (0.10, 0.15, 0.25):
+        for sd in range(3):
+            for eng in ("fast", "ref"):
+                x = make_spec(1.0, 8, p, sd, eng, rule=24)
+                if quick:
+                    x.update(burn=100, sweeps=1000)
+                sp.append(x)
+    enqueue(r2log, sp)
+    work(r2log, 3600, parallel, reclaim=False)
+    ok, rows = r2_check(r2log, 24)
+    check("rule family R2: reference and fast engine agree (|z| < 5)", ok,
+          f"(max |z| = {max(r[-1] for r in rows):.2f} over {len(rows)} comparisons)")
+
+    # 10. controls: rules with no possible ordering must not be flagged, the majority rule must
+    det = {}
+    for rule in (0, 31, 24):
+        sp = [make_spec(1.0, L, p, sd, rule=rule) for L in SIZES for p in M["coarse"] for sd in range(2)]
+        if quick:
+            for x in sp:
+                x["sweeps"] = x["sweeps"] // 2
+        det[rule] = analyze_results(run_many(sp, parallel), B=60, divT=False)["detected"]
+    check("rule family controls: frozen-copy and always-flip rules show no transition, majority rule does",
+          (not det[0]) and (not det[31]) and det[24], f"(detected: {det})")
     use_mission("ising")
 
     print(f"\n{sum(results)}/{len(results)} checks passed")

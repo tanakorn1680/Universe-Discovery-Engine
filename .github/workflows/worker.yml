@@ -20,7 +20,7 @@ permissions:
 jobs:
   work:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -29,7 +29,7 @@ jobs:
       - run: pip install numpy
       - name: รันทุกโจทย์ (verify -> plan -> work -> analyze -> verify)
         run: |
-          for m in ising potts3; do
+          for m in ising potts3 pca; do
             echo "=== mission: $m"
             export DE_MISSION=$m
             python engine.py verify
