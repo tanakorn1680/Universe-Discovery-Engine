@@ -38,10 +38,18 @@ jobs:
             python engine.py analyze
             python engine.py verify
           done
-      - name: บันทึกผลกลับเข้า repo
+      - name: บันทึกผลกลับเข้า repo (ถ้ามีคอมมิตอื่นเข้ามาก่อน จะดึงมาต่อแล้วลองใหม่)
         run: |
           git config user.name "discovery-bot"
           git config user.email "discovery-bot@users.noreply.github.com"
           git add -A
-          git diff --cached --quiet || git commit -m "worker run $(date -u +%FT%TZ)"
-          git push
+          git diff --cached --quiet && exit 0
+          git commit -m "worker run $(date -u +%FT%TZ)"
+          for i in 1 2 3 4 5; do
+            git push && exit 0
+            echo "push rejected (attempt $i), rebasing onto remote"
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || { git rebase --abort || true; }
+            sleep $((i * 3))
+          done
+          echo "could not push after 5 attempts"
+          exit 1
