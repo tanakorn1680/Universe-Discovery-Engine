@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Discovery Engine V0 -- event-sourced, resumable, no LLM anywhere.
 
-State lives in ./state (override with DE_STATE). Commands:
+Missions (env DE_MISSION): ising (default) | potts3. State lives in ./state for ising and
+./state-<mission> otherwise (override with DE_STATE). Commands:
   plan       decide the next experiments and enqueue them (logged with a reason)
   work       run queued jobs; safe to kill at any moment, resume by running again
   analyze    estimate, test, write report.md
@@ -23,14 +24,29 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 
-STATE = os.environ.get("DE_STATE", "state")
-REPORT = os.environ.get("DE_REPORT", "report.md")
+MISSIONS = {
+    "ising": {"label": "Ising 2D", "sub": "ising2d", "q": None,
+              "coarse": [round(1.8 + 0.1 * k, 4) for k in range(13)], "span": 0.2,
+              "r2": (1.8, 2.3, 3.0), "known": (2.0 / math.log(1.0 + math.sqrt(2.0)), 1.75, 0.125)},
+    "potts3": {"label": "Potts q=3 2D", "sub": "potts", "q": 3,
+               "coarse": [round(0.7 + 0.05 * k, 4) for k in range(13)], "span": 0.1,
+               "r2": (0.7, 1.0, 1.3), "known": (1.0 / math.log(1.0 + math.sqrt(3.0)), 26.0 / 15.0, 2.0 / 15.0)},
+}
+MISSION = os.environ.get("DE_MISSION", "ising")
+M = MISSIONS[MISSION]
+STATE = os.environ.get("DE_STATE", "state" if MISSION == "ising" else f"state-{MISSION}")
+REPORT = os.environ.get("DE_REPORT", "report.md" if MISSION == "ising" else f"report-{MISSION}.md")
+
+
+def use_mission(name):
+    global MISSION, M
+    MISSION, M = name, MISSIONS[name]
 MAX_ATTEMPTS = 3
 LEASE_SECONDS = float(os.environ.get("DE_LEASE", "300"))
 ONSAGER_TC = 2.0 / math.log(1.0 + math.sqrt(2.0))  # used ONLY for after-the-fact comparison
 SIZES = (8, 16, 32)
 BUDGET = {8: (300, 4000), 16: (500, 5000), 32: (800, 6000)}  # (burn-in, measured sweeps)
-COARSE = [round(1.8 + 0.1 * k, 4) for k in range(13)]
+COARSE = MISSIONS["ising"]["coarse"]  # used by selftest only
 
 
 # ---------------------------------------------------------------- utilities
@@ -158,8 +174,11 @@ def project(events):
 
 def make_spec(J, L, T, seed, engine="fast"):
     burn, sweeps = BUDGET.get(L, (500, 5000))
-    return {"sub": "ising2d", "engine": engine, "J": J, "L": L, "T": round(float(T), 4),
+    spec = {"sub": M["sub"], "engine": engine, "J": J, "L": L, "T": round(float(T), 4),
             "seed": seed, "burn": burn, "sweeps": sweeps}
+    if M["q"]:
+        spec["q"] = M["q"]
+    return spec
 
 
 def enqueue(log, specs):
@@ -271,7 +290,62 @@ def sim_null(L, T, J, burn, sweeps, rng):
     return e, m
 
 
+def _potts_obs(s, q):
+    n = s.size
+    eq = int((s == np.roll(s, -1, 0)).sum()) + int((s == np.roll(s, -1, 1)).sum())
+    f = np.bincount(s.ravel(), minlength=q).max() / n
+    return -eq / n, (q * f - 1.0) / (q - 1.0)
+
+
+def sim_potts(L, T, J, burn, sweeps, rng, q):
+    """q-state Potts, checkerboard Metropolis. Energy = -J * (# equal neighbour bonds)."""
+    s = np.zeros((L, L), dtype=np.int8)
+    ii, jj = np.indices((L, L))
+    masks = [((ii + jj) % 2) == 0, ((ii + jj) % 2) == 1]
+    bJ = J / T
+    e, m = np.empty(sweeps), np.empty(sweeps)
+    for t in range(burn + sweeps):
+        for mk in masks:
+            nbs = (np.roll(s, 1, 0), np.roll(s, -1, 0), np.roll(s, 1, 1), np.roll(s, -1, 1))
+            new = rng.integers(0, q, size=(L, L), dtype=np.int8)
+            dn = sum((x == new).astype(np.int8) for x in nbs) - sum((x == s).astype(np.int8) for x in nbs)
+            acc = rng.random((L, L)) < np.exp(bJ * dn)
+            s = np.where(mk & acc, new, s)
+        if t >= burn:
+            e[t - burn], m[t - burn] = _potts_obs(s, q)
+    return e, m
+
+
+def sim_potts_ref(L, T, J, burn, sweeps, rng, q):
+    """Reference Potts engine: plain single-site Metropolis, typewriter order."""
+    s = [[0] * L for _ in range(L)]
+    bJ = J / T
+    n = L * L
+    e, m = np.empty(sweeps), np.empty(sweeps)
+    for t in range(burn + sweeps):
+        u = rng.random(n).tolist()
+        r = rng.integers(0, q, n).tolist()
+        k = 0
+        for i in range(L):
+            row, up, dn_ = s[i], s[(i - 1) % L], s[(i + 1) % L]
+            for j in range(L):
+                old, new = row[j], r[k]
+                if new != old:
+                    nb = (up[j], dn_[j], row[(j - 1) % L], row[(j + 1) % L])
+                    d = sum(x == new for x in nb) - sum(x == old for x in nb)
+                    if d >= 0 or u[k] < math.exp(bJ * d):
+                        row[j] = new
+                k += 1
+        if t >= burn:
+            eq = sum((s[i][j] == s[(i + 1) % L][j]) + (s[i][j] == s[i][(j + 1) % L])
+                     for i in range(L) for j in range(L))
+            f = max(sum(row.count(c) for row in s) for c in range(q)) / n
+            e[t - burn], m[t - burn] = -eq / n, (q * f - 1.0) / (q - 1.0)
+    return e, m
+
+
 SIMS = {"fast": sim_fast, "ref": sim_ref, "null_iid": sim_null}
+POTTS = {"fast": sim_potts, "ref": sim_potts_ref}
 
 
 def tau_int(x):
@@ -303,7 +377,10 @@ def summarize(e, m, nblocks=10):
 def run_spec(spec):
     """Pure function: spec -> result. Seeded only by the spec itself (counter-based RNG)."""
     rng = np.random.Generator(np.random.Philox(key=int(sha(canon(spec))[:32], 16)))
-    e, m = SIMS[spec["engine"]](spec["L"], spec["T"], spec["J"], spec["burn"], spec["sweeps"], rng)
+    if spec["sub"] == "potts":
+        e, m = POTTS[spec["engine"]](spec["L"], spec["T"], spec["J"], spec["burn"], spec["sweeps"], rng, spec["q"])
+    else:
+        e, m = SIMS[spec["engine"]](spec["L"], spec["T"], spec["J"], spec["burn"], spec["sweeps"], rng)
     return {"spec": spec, "blocks": summarize(e, m), "tau_absm": round(tau_int(np.abs(m)), 3),
             "n": int(len(m)),
             "prov": {"code": code_hash(), "numpy": np.__version__, "python": platform.python_version()}}
@@ -317,11 +394,13 @@ def run_many(specs, parallel):
 
 
 # -------------------------------------------------------------- analysis
-def load_results(log, engine="fast", J=None):
+def load_results(log, engine="fast", J=None, sub=None):
+    sub = sub or M["sub"]
     out = []
     for j in project(log.events).values():
         s = j["spec"]
-        if j["state"] == "done" and s["engine"] == engine and (J is None or s["J"] == J):
+        if (j["state"] == "done" and s["engine"] == engine and s["sub"] == sub
+                and (J is None or s["J"] == J)):
             out.append(log.get_artifact(j["artifact"]))
     return out
 
@@ -428,9 +507,11 @@ def plan(log):
     plans = [e["payload"] for e in log.events if e["type"] == "Plan"]
     stage = max((p["stage"] for p in plans), default=0)
     if stage == 0:
-        specs = [make_spec(1.0, L, T, s) for L in SIZES for T in COARSE for s in range(3)]
-        specs += [make_spec(1.0, 8, T, s, "ref") for T in (1.8, 2.3, 3.0) for s in range(3)]
-        reason = ("stage 1: no data yet -> space-filling coarse sweep T=1.8..3.0 (step 0.1), "
+        co = M["coarse"]
+        specs = [make_spec(1.0, L, T, s) for L in SIZES for T in co for s in range(3)]
+        specs += [make_spec(1.0, 8, T, s, "ref") for T in M["r2"] for s in range(3)]
+        reason = (f"stage 1 [{M['label']}]: no data yet -> space-filling coarse sweep "
+                  f"T={co[0]}..{co[-1]} (step {round(co[1] - co[0], 4)}), "
                   "3 sizes x 3 seeds, plus reference-engine jobs (L=8) for the R2 check")
         temps = []
     else:
@@ -438,10 +519,10 @@ def plan(log):
         last = [p for p in plans if p["stage"] == stage][-1]
         if stage == 1:
             tp = est["tp"]
-            temps = [round(float(t), 4) for t in tp + np.linspace(-0.2, 0.2, 11)]
+            temps = [round(float(t), 4) for t in tp + np.linspace(-M["span"], M["span"], 11)]
             specs = [make_spec(1.0, L, T, s) for L in SIZES for T in temps for s in range(3)]
-            reason = (f"stage 2: susceptibility-like peak sits near T={tp:.3f} on the coarse grid "
-                      f"-> refine +-0.2 around it (11 points) to resolve the peak and the crossings")
+            reason = (f"stage 2 [{M['label']}]: susceptibility-like peak sits near T={tp:.3f} on the coarse grid "
+                      f"-> refine +-{M['span']} around it (11 points) to resolve the peak and the crossings")
         else:
             lo, hi = est["ci"]["g_nu"]
             nseed = last["seed_max"] + 1
@@ -471,7 +552,8 @@ def write_report(log):
     for j in jobs.values():
         states[j["state"]] = states.get(j["state"], 0) + 1
     ok, n = verify_chain(log.events)
-    lines = [f"# รายงาน Discovery Engine V0",
+    ktc, kg, kb = M["known"]
+    lines = [f"# รายงาน Discovery Engine V0 — {M['label']}",
              "",
              f"สร้างเมื่อ {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} UTC · code `{code_hash()}`",
              "",
@@ -488,7 +570,7 @@ def write_report(log):
         est = analyze_results(results)
         r2ok, rows = r2_check(log)
         ci = est["ci"]
-        lines += ["## ผลการประมาณ (substrate: Ising-type บนตาราง 2 มิติ, ขนาด L = "
+        lines += [f"## ผลการประมาณ (substrate: {M['label']}, ขนาด L = "
                   + ", ".join(str(L) for L in sorted(est["peaks"])) + ")",
                   "",
                   "| ปริมาณ | ค่าประมาณ | 95% CI (bootstrap) |",
@@ -513,14 +595,14 @@ def write_report(log):
                   "| L | T | observable | ref | fast | z |", "|---|---|---|---|---|---|"]
         lines += [f"| {L} | {T} | {k} | {a:.4f} | {b:.4f} | {z:.2f} |" for L, T, k, a, b, z in rows]
         lines += ["", "## Assumption ledger",
-                  "- กฎ: Metropolis บน Ising 2 มิติ, J=1, boundary แบบ periodic, เริ่มจากสถานะเรียงตัวทั้งหมด",
+                  f"- กฎ: Metropolis บน {M['label']}, J=1, boundary แบบ periodic, เริ่มจากสถานะเรียงตัวทั้งหมด",
                   "- ขนาด L = 8, 16, 32 เท่านั้น (finite-size effects ยังมีผล)",
                   "- ตารางอุณหภูมิถูกเลือกโดย selector ตามเหตุผลในหัวข้อถัดไป",
                   "- analysis ไม่ได้รับค่าที่รู้ล่วงหน้าใด ๆ; ใช้ moment ทั่วไปของสถานะ (ค่าเฉลี่ย |m|, m², m⁴)",
                   "", "## เทียบความรู้เดิม (ทำหลังวิเคราะห์ ระบบไม่ได้ถูกบอกค่าเหล่านี้)",
-                  f"- Onsager exact: Tc = {ONSAGER_TC:.4f}, γ/ν = 1.75, β/ν = 0.125",
-                  f"- ความต่างจากค่าประมาณ: Tc {fmt(None if est['tc'] is None else est['tc'] - ONSAGER_TC)}, "
-                  f"γ/ν {fmt(est['g_nu'] - 1.75)}, β/ν {fmt(None if est['b_nu'] is None else est['b_nu'] - 0.125)}"]
+                  f"- ค่า exact ของ {M['label']}: Tc = {ktc:.4f}, γ/ν = {kg:.4f}, β/ν = {kb:.4f}",
+                  f"- ความต่างจากค่าประมาณ: Tc {fmt(None if est['tc'] is None else est['tc'] - ktc)}, "
+                  f"γ/ν {fmt(est['g_nu'] - kg)}, β/ν {fmt(None if est['b_nu'] is None else est['b_nu'] - kb)}"]
     plans = [e["payload"] for e in log.events if e["type"] == "Plan"]
     if plans:
         lines += ["", "## ประวัติการเลือกการทดลอง"]
@@ -533,6 +615,7 @@ def write_report(log):
 # -------------------------------------------------------------- selftest
 def selftest(quick):
     parallel = os.cpu_count() or 1
+    use_mission("ising")
     tmp = tempfile.mkdtemp(prefix="de-selftest-")
     results = []
 
@@ -637,6 +720,24 @@ def selftest(quick):
           and est["b_nu"] is not None and abs(est["b_nu"] - 0.125) < 0.07)
     check("known answer: Tc, gamma/nu, beta/nu close to exact values", ok,
           f"(Tc {fmt(est['tc'])} vs {ONSAGER_TC:.3f}; g/nu {fmt(est['g_nu'])} vs 1.75; b/nu {fmt(est['b_nu'])} vs 0.125)")
+
+    # 8. held-out substrate: Potts q=3 was never used to tune anything
+    use_mission("potts3")
+    kt, kg, kb = M["known"]
+    pgrid = [round(0.85 + 0.025 * k, 4) for k in range(13)]
+    psp = []
+    for L in SIZES:
+        for T in pgrid:
+            for sd in range(3):
+                sp = make_spec(1.0, L, T, sd)
+                sp["sweeps"] = int(sp["sweeps"] * sweepscale)
+                psp.append(sp)
+    est = analyze_results(run_many(psp, parallel), B=100)
+    ok = (est["detected"] and abs(est["tc"] - kt) < 0.04 and abs(est["g_nu"] - kg) < 0.3
+          and est["b_nu"] is not None and abs(est["b_nu"] - kb) < 0.07)
+    check("held-out substrate Potts q=3: Tc, gamma/nu, beta/nu close to exact values", ok,
+          f"(Tc {fmt(est['tc'])} vs {kt:.3f}; g/nu {fmt(est['g_nu'])} vs {kg:.3f}; b/nu {fmt(est['b_nu'])} vs {kb:.3f})")
+    use_mission("ising")
 
     print(f"\n{sum(results)}/{len(results)} checks passed")
     return all(results)
