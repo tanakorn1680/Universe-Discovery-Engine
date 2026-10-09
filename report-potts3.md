@@ -1,21 +1,21 @@
 # รายงาน Discovery Engine V0 — Potts q=3 2D
 
-สร้างเมื่อ 2026-10-09 01:18:01 UTC · code `29b6327d390ac66c`
+สร้างเมื่อ 2026-10-09 01:24:17 UTC · code `29b6327d390ac66c`
 
 ผลทั้งหมดนี้เป็นผลของ simulation ภายใต้ model และ assumption ด้านล่าง ไม่ใช่กฎของธรรมชาติ
 
 ## สถานะ
-- events 379 รายการ · hash chain: ผ่าน
-- jobs: done 126
+- events 677 รายการ · hash chain: ผ่าน
+- jobs: done 225
 
 ## ผลการประมาณ (substrate: Potts q=3 2D, ขนาด L = 8, 16, 32)
 
 | ปริมาณ | ค่าประมาณ | 95% CI (bootstrap) |
 |---|---|---|
-| T ที่ susceptibility สูงสุด (เฉลี่ยทุกขนาด) | 1.030 | 1.027 ถึง 1.038 |
-| T ที่เส้น Binder ตัดกัน | 0.959 | 0.955 ถึง 1.006 |
-| เลขชี้กำลังของยอด susceptibility เทียบ L | 1.863 | 1.680 ถึง 1.995 |
-| เลขชี้กำลังของ order statistic ที่จุดตัด | 0.042 | 0.032 ถึง 0.403 |
+| T ที่ susceptibility สูงสุด (เฉลี่ยทุกขนาด) | 1.034 | 1.015 ถึง 1.041 |
+| T ที่เส้น Binder ตัดกัน | 0.984 | 0.974 ถึง 1.045 |
+| เลขชี้กำลังของยอด susceptibility เทียบ L | 1.755 | 0.978 ถึง 1.946 |
+| เลขชี้กำลังของ order statistic ที่จุดตัด | 0.099 | 0.053 ถึง 0.845 |
 
 ## คำตัดสิน
 พบ candidate ของ phase transition ระดับ **L2 (ชั่วคราว)**: ยอด susceptibility สูงขึ้นตามขนาดระบบ (CI ล่างของเลขชี้กำลัง > 0.5) และเส้น Binder ตัดกัน
@@ -42,7 +42,8 @@ L2 ต้องผ่าน R2 และมี ≥ 3 ขนาด; R2 ที่�
 
 ## เทียบความรู้เดิม (ทำหลังวิเคราะห์ ระบบไม่ได้ถูกบอกค่าเหล่านี้)
 - ค่า exact ของ Potts q=3 2D: Tc = 0.9950, γ/ν = 1.7333, β/ν = 0.1333
-- ความต่างจากค่าประมาณ: Tc -0.036, γ/ν 0.129, β/ν -0.091
+- ความต่างจากค่าประมาณ: Tc -0.011, γ/ν 0.021, β/ν -0.034
 
 ## ประวัติการเลือกการทดลอง
 - stage 1 [Potts q=3 2D]: no data yet -> space-filling coarse sweep T=0.7..1.3 (step 0.05), 3 sizes x 3 seeds, plus reference-engine jobs (L=8) for the R2 check (126 jobs)
+- stage 2 [Potts q=3 2D]: susceptibility-like peak sits near T=1.030 on the coarse grid -> refine +-0.1 around it (11 points) to resolve the peak and the crossings (99 jobs)
