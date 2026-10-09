@@ -1,12 +1,12 @@
 # รายงาน Discovery Engine — noisy CA family (32 symmetric rules)
 
-สร้างเมื่อ 2026-10-09 13:27:53 UTC · code `45ff4d02ba6ddfab`
+สร้างเมื่อ 2026-10-09 22:42:29 UTC · code `45ff4d02ba6ddfab`
 
 ผลทั้งหมดนี้เป็นผลของ simulation ภายใต้ model และ assumption ด้านล่าง ไม่ใช่กฎของธรรมชาติ
 
 ## สถานะ
-- events 10496 รายการ · hash chain: ผ่าน
-- jobs: done 3498
+- events 10794 รายการ · hash chain: ผ่าน
+- jobs: done 3597
 
 ## สรุปแบบง่าย
 ระบบลองกฎ 32 แบบ (กฎที่สมมาตรเมื่อสลับ 0 กับ 1) แล้วตรวจว่ากฎไหนมีจุดเปลี่ยนสถานะเมื่อเพิ่มสัญญาณรบกวน:
@@ -42,7 +42,7 @@
 | 20 | 00101 | 0.107 | -0.408 | 0.970 | - | ไม่พบจุดเปลี่ยน |
 | 21 | 10101 | 0.190 | -0.008 | 1.000 | - | ไม่พบจุดเปลี่ยน |
 | 22 | 01101 | 0.084 | -0.073 | 1.008 | - | ไม่พบจุดเปลี่ยน |
-| 23 | 11101 | 0.055 | 1.876 | 0.173 | L2 ชั่วคราว | เข้ากับ Ising class |
+| 23 | 11101 | 0.055 | 1.480 | 0.142 | L2 ชั่วคราว | เข้ากับ Ising class |
 | 24 | 00011 | 0.136 | 1.723 | 0.199 | L2 ชั่วคราว | ใกล้ Ising (γ/ν ตรง, β/ν ต่างเล็กน้อย) |
 | 25 | 10011 | 0.104 | 0.080 | 1.007 | - | ไม่พบจุดเปลี่ยน |
 | 26 | 01011 | 0.117 | -0.040 | 1.007 | - | ไม่พบจุดเปลี่ยน |
@@ -62,3 +62,4 @@
 ## ประวัติการเลือกการทดลอง
 - stage 1 [noisy CA family (32 symmetric rules)]: no data yet -> screen all 32 rules on a coarse noise grid p=0.025..0.4 (step 0.025), 3 sizes x 2 seeds each (3072 jobs)
 - stage 2 [noisy CA family (32 symmetric rules)]: 4 of 32 rules show a transition signal (rules [7, 8, 23, 24]) -> refine +-0.06 around each susceptibility peak and add reference-engine jobs (R2); the other rules get no more compute (426 jobs)
+- stage 3 [noisy CA family (32 symmetric rules)]: exponent CI still wide for rules [23] -> 3 more seeds at their refined noise levels (99 jobs)
