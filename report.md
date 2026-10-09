@@ -1,21 +1,21 @@
 # รายงาน Discovery Engine V0
 
-สร้างเมื่อ 2026-10-09 00:09:09 UTC · code `95e2bf0d2ebbd01b`
+สร้างเมื่อ 2026-10-09 00:16:31 UTC · code `95e2bf0d2ebbd01b`
 
 ผลทั้งหมดนี้เป็นผลของ simulation ภายใต้ model และ assumption ด้านล่าง ไม่ใช่กฎของธรรมชาติ
 
 ## สถานะ
-- events 379 รายการ · hash chain: ผ่าน
-- jobs: done 126
+- events 677 รายการ · hash chain: ผ่าน
+- jobs: done 225
 
 ## ผลการประมาณ (substrate: Ising-type บนตาราง 2 มิติ, ขนาด L = 8, 16, 32)
 
 | ปริมาณ | ค่าประมาณ | 95% CI (bootstrap) |
 |---|---|---|
-| T ที่ susceptibility สูงสุด (เฉลี่ยทุกขนาด) | 2.412 | 2.394 ถึง 2.424 |
-| T ที่เส้น Binder ตัดกัน | 2.240 | 2.230 ถึง 2.259 |
-| เลขชี้กำลังของยอด susceptibility เทียบ L | 1.769 | 1.681 ถึง 1.887 |
-| เลขชี้กำลังของ order statistic ที่จุดตัด | 0.093 | 0.083 ถึง 0.125 |
+| T ที่ susceptibility สูงสุด (เฉลี่ยทุกขนาด) | 2.429 | 2.386 ถึง 2.445 |
+| T ที่เส้น Binder ตัดกัน | 2.271 | 2.261 ถึง 2.284 |
+| เลขชี้กำลังของยอด susceptibility เทียบ L | 1.764 | 1.717 ถึง 1.916 |
+| เลขชี้กำลังของ order statistic ที่จุดตัด | 0.118 | 0.102 ถึง 0.149 |
 
 ## คำตัดสิน
 พบ candidate ของ phase transition ระดับ **L2 (ชั่วคราว)**: ยอด susceptibility สูงขึ้นตามขนาดระบบ (CI ล่างของเลขชี้กำลัง > 0.5) และเส้น Binder ตัดกัน
@@ -42,7 +42,8 @@ L2 ต้องผ่าน R2 และมี ≥ 3 ขนาด; R2 ที่�
 
 ## เทียบความรู้เดิม (ทำหลังวิเคราะห์ ระบบไม่ได้ถูกบอกค่าเหล่านี้)
 - Onsager exact: Tc = 2.2692, γ/ν = 1.75, β/ν = 0.125
-- ความต่างจากค่าประมาณ: Tc -0.029, γ/ν 0.019, β/ν -0.032
+- ความต่างจากค่าประมาณ: Tc 0.002, γ/ν 0.014, β/ν -0.007
 
 ## ประวัติการเลือกการทดลอง
 - stage 1: no data yet -> space-filling coarse sweep T=1.8..3.0 (step 0.1), 3 sizes x 3 seeds, plus reference-engine jobs (L=8) for the R2 check (126 jobs)
+- stage 2: susceptibility-like peak sits near T=2.412 on the coarse grid -> refine +-0.2 around it (11 points) to resolve the peak and the crossings (99 jobs)
