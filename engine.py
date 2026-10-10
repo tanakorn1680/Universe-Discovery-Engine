@@ -32,10 +32,12 @@ MISSIONS = {
                "coarse": [round(0.7 + 0.05 * k, 4) for k in range(13)], "span": 0.1,
                "r2": (0.7, 1.0, 1.3), "known": (1.0 / math.log(1.0 + math.sqrt(3.0)), 26.0 / 15.0, 2.0 / 15.0)},
 }
+BIG_SIZES = (64, 128)
 RULES = list(range(32))  # symmetric totalistic noisy-CA family: 5 free bits
 MISSIONS["pca"] = {"label": "noisy CA family (32 symmetric rules)", "sub": "pca", "q": None, "multi": True,
                    "coarse": [round(0.025 * k, 4) for k in range(1, 17)], "span": 0.06, "divT": False,
-                   "budget": {8: (200, 2000), 16: (300, 3000), 32: (400, 4000)}, "known": None}
+                   "budget": {8: (200, 2000), 16: (300, 3000), 32: (400, 4000), 64: (500, 8000), 128: (800, 20000)},
+                   "known": None}
 MISSION = os.environ.get("DE_MISSION", "ising")
 M = MISSIONS[MISSION]
 STATE = os.environ.get("DE_STATE", "state" if MISSION == "ising" else f"state-{MISSION}")
@@ -511,9 +513,14 @@ def estimate(cv):
     picked = []
     for L1, L2 in zip(Ls[:-1], Ls[1:]):
         a, b = cv[L1], cv[L2]
-        if len(a) != len(b) or not np.allclose(a[:, 0], b[:, 0]):
-            continue
-        d, T = a[:, 2] - b[:, 2], a[:, 0]
+        if len(a) == len(b) and np.allclose(a[:, 0], b[:, 0]):
+            d, T = a[:, 2] - b[:, 2], a[:, 0]
+        else:  # different noise grids per size (zoomed): compare on a fine common grid
+            lo, hi = max(a[0, 0], b[0, 0]), min(a[-1, 0], b[-1, 0])
+            if lo >= hi:
+                continue
+            T = np.linspace(lo, hi, 4001)
+            d = np.interp(T, a[:, 0], a[:, 2]) - np.interp(T, b[:, 0], b[:, 2])
         cr = [float(T[i] + (T[i + 1] - T[i]) * (-d[i]) / (d[i + 1] - d[i]))
               for i in range(len(d) - 1) if d[i] < 0 <= d[i + 1]]
         if cr:
@@ -610,29 +617,88 @@ def plan(log):
     return f"{reason} [{n} jobs enqueued]"
 
 
-def pca_estimates(log, rules, B):
+def top_window(Ls):
+    return tuple(sorted(set(Ls))[-3:])
+
+
+def restrict(results, sizes):
+    """Keep the given sizes, and only the noise levels present for every one of them."""
+    res = [x for x in results if x["spec"]["L"] in sizes]
+    common = None
+    for L in sizes:
+        Ts = {x["spec"]["T"] for x in res if x["spec"]["L"] == L}
+        common = Ts if common is None else common & Ts
+    return [x for x in res if x["spec"]["T"] in (common or set())]
+
+
+def pca_estimates(log, rules, B, sizes=None):
+    """sizes=None: sizes up to 32 (screening/refinement); 'top': the three largest sizes with data;
+    or an explicit tuple of sizes."""
     out = {}
     for r in rules:
         res = load_results(log, "fast", 1.0, rule=r)
-        if len({x["spec"]["L"] for x in res}) < 2:
+        Ls = {x["spec"]["L"] for x in res}
+        if sizes is None:
+            use = tuple(sorted(L for L in Ls if L in SIZES))
+        elif sizes == "top":
+            use = top_window(Ls)
+        else:
+            use = tuple(sizes)
+        if len(use) < 2 or not set(use) <= Ls:
             continue
         try:
-            out[r] = analyze_results(res, B=B, divT=False)
+            out[r] = analyze_results([x for x in res if x["spec"]["L"] in use], B=B, divT=False)
+            out[r]["sizes"] = use
         except (ValueError, np.linalg.LinAlgError):
             out[r] = None  # degenerate data (e.g. constant order parameter)
     return out
 
 
+def zoom_specs(log, flagged):
+    """The susceptibility peak narrows like 1/L, so a fixed noise grid stops resolving it at large sizes.
+    For every candidate rule and size >= 32, put a finer grid around the current peak until the spacing
+    is a fraction of the estimated peak width."""
+    specs, notes = [], []
+    for r in flagged:
+        res = load_results(log, "fast", 1.0, rule=r)
+        Ls = sorted({x["spec"]["L"] for x in res})
+        win = top_window(Ls)
+        sub = [x for x in res if x["spec"]["L"] in win]
+        try:
+            est0 = estimate(curves(pool_blocks(sub), divT=False))
+        except (ValueError, np.linalg.LinAlgError):
+            continue
+        pc = est0["tc"] if est0["tc"] is not None else est0["tp"]
+        cv = curves(pool_blocks(res), divT=False)
+        for L in sorted(cv):
+            if L < 32:
+                continue
+            a = cv[L]
+            T, chi = a[:, 0], a[:, 1]
+            i = int(np.argmax(chi))
+            gaps = [T[i] - T[i - 1]] if i > 0 else []
+            gaps += [T[i + 1] - T[i]] if i < len(T) - 1 else []
+            spacing = float(max(gaps))
+            target = 4.7 * pc / L / 4.0  # peak width ~ 4.7*pc/L; want >= 4 points across it
+            if spacing <= target * 1.15:
+                continue
+            lo, hi = min(T[i], pc) - spacing, max(T[i], pc) + spacing
+            grid = [round(float(x), 4) for x in np.linspace(max(lo, 0.001), min(hi, 0.5), 13)]
+            specs += [make_spec(1.0, L, p, s, rule=r) for p in grid for s in range(3)]
+            notes.append(f"rule {r} L={L}: peak at p={T[i]:.4f}, grid spacing {spacing:.4f} > {target:.4f}")
+    return specs, notes
+
+
 def plan_pca(log):
-    """Selector for the rule-family mission: screen every rule, then spend effort only where
-    a transition candidate appears, then add seeds only where the exponent is still uncertain."""
+    """Selector for the rule-family mission: screen every rule, spend effort only where a transition
+    candidate appears, then test whether odd-looking exponents survive much larger systems."""
     jobs = project(log.events)
     if any(j["state"] in ("queued", "leased") and j["attempt"] < MAX_ATTEMPTS for j in jobs.values()):
         return "queue not empty; nothing to plan"
     plans = [e["payload"] for e in log.events if e["type"] == "Plan"]
     stage = max((p["stage"] for p in plans), default=0)
     co, span = M["coarse"], M["span"]
-    flagged, temps, seed_max = [], {}, 1
+    flagged, temps, seed_max, big_seed_max, zoom_round = [], {}, 1, -1, 0
     if stage == 0:
         specs = [make_spec(1.0, L, p, s, rule=r) for r in RULES for L in SIZES for p in co for s in range(2)]
         reason = (f"stage 1 [{M['label']}]: no data yet -> screen all {len(RULES)} rules on a coarse noise grid "
@@ -644,7 +710,7 @@ def plan_pca(log):
             flagged = sorted(r for r, e in est.items() if e and e["detected"])
             if not flagged:
                 log.append("Plan", {"stage": 2, "reason": "stage 2: no rule passed screening -> nothing to refine",
-                                    "n_jobs": 0, "flagged": [], "temps": {}, "seed_max": 1})
+                                    "n_jobs": 0, "flagged": [], "temps": {}, "seed_max": 1, "big_seed_max": -1})
                 return "no rule passed screening"
             for r in flagged:
                 tp = est[r]["tp"]
@@ -656,26 +722,40 @@ def plan_pca(log):
                       f"(rules {flagged}) -> refine +-{span} around each susceptibility peak and add reference-engine "
                       f"jobs (R2); the other rules get no more compute")
         else:
-            flagged, temps = last["flagged"], last["temps"]
-            est = pca_estimates(log, flagged, B=40)
-            nseed = last["seed_max"] + 1
-            wide = []
-            for r in flagged:
-                e = est.get(r)
-                lo, hi = e["ci"]["g_nu"] if e else (None, None)
-                if lo is not None and hi - lo > 0.7:
-                    wide.append(r)
-            if not wide or nseed >= 9:
-                return f"converged enough for this stage (rules still wide: {wide}, seeds={nseed}); nothing to add"
-            specs = [make_spec(1.0, L, p, s, rule=r) for r in wide for L in SIZES for p in temps[str(r)]
-                     for s in range(nseed, nseed + 3)]
-            seed_max = nseed + 2
-            reason = (f"stage {stage + 1} [{M['label']}]: exponent CI still wide for rules {wide} "
-                      f"-> 3 more seeds at their refined noise levels")
+            flagged, temps, seed_max = last["flagged"], last["temps"], last["seed_max"]
+            big_seed_max = last.get("big_seed_max", -1)
+            zoom_round = last.get("zoom_round", 0)
+            if not flagged:
+                return "converged: no candidate rules"
+            if big_seed_max < 0:
+                specs = [make_spec(1.0, L, p, s, rule=r) for r in flagged for L in BIG_SIZES
+                         for p in temps[str(r)] for s in range(3)]
+                big_seed_max = 2
+                reason = (f"stage {stage + 1} [{M['label']}]: finite-size check -> run candidate rules {flagged} at much "
+                          f"larger sizes L={list(BIG_SIZES)} (same noise levels, 3 seeds) to see whether odd exponents "
+                          f"are only small-system effects")
+            else:
+                zr = max((p.get("zoom_round", 0) for p in plans), default=0)
+                specs, notes = zoom_specs(log, flagged) if zr < 3 else ([], [])
+                if not specs:
+                    return f"converged for this mission (zoom rounds done: {zr}); nothing to add"
+                zoom_round = zr + 1
+                reason = (f"stage {stage + 1} [{M['label']}]: zoom round {zoom_round} -> the peak is narrower than the "
+                          f"noise grid at large sizes ({len(notes)} rule/size pairs, e.g. {notes[0]}); "
+                          f"finer grid around each peak")
     n = enqueue(log, specs)
     log.append("Plan", {"stage": stage + 1, "reason": reason, "n_jobs": n, "flagged": flagged,
-                         "temps": temps, "seed_max": seed_max})
+                         "temps": temps, "seed_max": seed_max, "big_seed_max": big_seed_max,
+                         "zoom_round": zoom_round})
     return f"{reason} [{n} jobs enqueued]"
+
+
+def ci_contains_ising(est):
+    """At large sizes the point estimates are noisy, so judge by whether the 95% interval covers Ising."""
+    (gl, gh), (bl, bh) = est["ci"]["g_nu"], est["ci"]["b_nu"]
+    if None in (gl, gh, bl, bh):
+        return None
+    return gl <= 1.75 <= gh and bl <= 0.125 <= bh
 
 
 def classify_ising(est):
@@ -683,6 +763,11 @@ def classify_ising(est):
         return "วิเคราะห์ไม่ได้ (ข้อมูลเสื่อม)"
     if not est["detected"]:
         return "ไม่พบจุดเปลี่ยน"
+    if max(est.get("sizes", (0,))) > 32:  # large-size data: interval-based judgement
+        c = ci_contains_ising(est)
+        if c is None:
+            return "พบสัญญาณ แต่ข้อมูลยังไม่พอจัดกลุ่ม"
+        return "ไม่ขัดแย้งกับ Ising (ที่ขนาดใหญ่)" if c else "ไม่เข้ากับ Ising class: ผู้สมัครที่ต้องตรวจเพิ่ม"
     lo, hi = est["ci"]["g_nu"]
     if lo is None or hi - lo > 1.2:
         return "พบสัญญาณ แต่ข้อมูลยังไม่พอจัดกลุ่ม"
@@ -768,6 +853,27 @@ def write_report(log):
     return REPORT
 
 
+def ising_distance_ok(e):
+    return (e is not None and e["b_nu"] is not None
+            and abs(e["g_nu"] - 1.75) < 0.3 and abs(e["b_nu"] - 0.125) < 0.07)
+
+
+def trend_verdict(wins):
+    """wins: list of (sizes, estimate) from small to large windows."""
+    last = wins[-1][1]
+    if last is None or not last["detected"]:
+        return "สัญญาณจุดเปลี่ยนหายไปเมื่อระบบใหญ่ขึ้น"
+    c = ci_contains_ising(last)
+    if c is None:
+        return "ที่ขนาดใหญ่สุดข้อมูลยังไม่พอจะสรุป"
+    (gl, gh), (bl, bh) = last["ci"]["g_nu"], last["ci"]["b_nu"]
+    wide = (gh - gl > 0.5) or (bh - bl > 0.4)
+    if c:
+        return ("ไม่ขัดแย้งกับ Ising ที่ขนาดใหญ่สุด (ช่วงความไม่แน่นอนครอบค่า Ising ทั้งสองค่า"
+                + ("; แต่ช่วงยังกว้าง ยืนยันได้ไม่แน่นหนา)" if wide else ")"))
+    return "ช่วงความไม่แน่นอนไม่ครอบค่า Ising ที่ขนาดใหญ่สุด: ผู้สมัครที่ควรให้ผู้เชี่ยวชาญตรวจ"
+
+
 def write_report_pca(log):
     jobs = project(log.events)
     states = {}
@@ -781,37 +887,65 @@ def write_report_pca(log):
              "## สถานะ",
              f"- events {n} รายการ · hash chain: {'ผ่าน' if ok else 'ไม่ผ่าน'}",
              "- jobs: " + ", ".join(f"{k} {v}" for k, v in sorted(states.items())), ""]
-    est = pca_estimates(log, RULES, B=60)
+    est = pca_estimates(log, RULES, B=60, sizes="top")
     stage = max((p["stage"] for p in plans), default=0)
     pending = any(j["state"] in ("queued", "leased") and j["attempt"] < MAX_ATTEMPTS for j in jobs.values())
     final = stage >= 2 and not pending  # coarse-grid exponents are biased low; only classify after refinement
     rows, counts = [], {}
+    f3 = lambda x: "-" if x is None else f"{x:.3f}"
     for r in RULES:
-        e = est.get(r)
         if r not in est:
             continue
+        e = est[r]
         cls = classify_ising(e) if (final or not (e and e["detected"])) else "พบสัญญาณ รอการซูมเพิ่ม"
-        r2ok, r2rows = r2_check(log, r)
-        lvl = ""
-        if e and e["detected"]:
-            lvl = "L2 ชั่วคราว" if r2ok else "L1"
+        r2ok, _ = r2_check(log, r)
+        lvl = ("L2 ชั่วคราว" if r2ok else "L1") if (e and e["detected"]) else "-"
         counts[cls] = counts.get(cls, 0) + 1
-        f = lambda x: "-" if x is None else f"{x:.3f}"
-        rows.append(f"| {r} | {rule_text(r)} | {f(e and e['tc'])} | {f(e and e['g_nu'])} | "
-                    f"{f(e and e['b_nu'])} | {lvl or '-'} | {cls} |")
+        win = "/".join(str(L) for L in e["sizes"]) if e else "-"
+        rows.append(f"| {r} | {rule_text(r)} | {f3(e and e['tc'])} | {f3(e and e['g_nu'])} | "
+                    f"{f3(e and e['b_nu'])} | {win} | {lvl} | {cls} |")
     lines += ["## สรุปแบบง่าย",
               f"ระบบลองกฎ {len(est)} แบบ (กฎที่สมมาตรเมื่อสลับ 0 กับ 1) แล้วตรวจว่ากฎไหนมีจุดเปลี่ยนสถานะเมื่อเพิ่มสัญญาณรบกวน:"]
     lines += [f"- {c}: {k} กฎ" for c, k in sorted(counts.items(), key=lambda x: -x[1])]
-    lines += ["", "ตาราง: รหัสกฎ · ตารางกฎ (เมื่อเซลล์เป็น 0 และเพื่อนบ้านเป็น 1 จำนวน 0..4 ตัว จะเปลี่ยนเป็นอะไร) · "
-              "สัญญาณรบกวน p ที่จุดเปลี่ยน · γ/ν · β/ν · ระดับ · การจัดกลุ่ม", "",
-              "| กฎ | ตาราง | p_c | γ/ν | β/ν | ระดับ | จัดกลุ่ม |", "|---|---|---|---|---|---|---|"]
+
+    # finite-size check for the candidates that have data at large sizes
+    verdicts = []
+    for r in RULES:
+        res = load_results(log, "fast", 1.0, rule=r)
+        Ls = sorted({x["spec"]["L"] for x in res})
+        if len(Ls) < 4 or max(Ls) <= 32:
+            continue
+        wins = []
+        for i in range(len(Ls) - 2):
+            w = tuple(Ls[i:i + 3])
+            try:
+                ew = analyze_results([x for x in res if x["spec"]["L"] in w], B=60, divT=False)
+            except (ValueError, np.linalg.LinAlgError):
+                ew = None
+            wins.append((w, ew))
+        verdicts.append((r, wins, trend_verdict(wins)))
+    if verdicts:
+        lines += ["", "## ตรวจด้วยระบบขนาดใหญ่ขึ้น (ขนาด L เล็กไปใหญ่)",
+                  "เทียบค่าที่ได้เมื่อใช้ระบบขนาดต่างกัน ถ้าค่าขยับเข้าหา Ising (γ/ν = 1.75, β/ν = 0.125) "
+                  "เมื่อระบบใหญ่ขึ้น แปลว่าความแปลกมาจากระบบเล็ก ที่ขนาดใหญ่ค่าจุดแกว่งมาก จึงตัดสินด้วย "
+                  "\"ช่วงความไม่แน่นอน 95% ครอบค่า Ising หรือไม่\"", ""]
+        for r, wins, v in verdicts:
+            lines += [f"**กฎ {r}** ({rule_text(r)}): {v}", "",
+                      "| ขนาดที่ใช้ | p_c | γ/ν | β/ν |", "|---|---|---|---|"]
+            lines += [f"| {'/'.join(map(str, w))} | {f3(e and e['tc'])} | {f3(e and e['g_nu'])} | {f3(e and e['b_nu'])} |"
+                      for w, e in wins]
+            lines += [""]
+    lines += ["", "ตารางหลัก: รหัสกฎ · ตารางกฎ (เมื่อเซลล์เป็น 0 และเพื่อนบ้านเป็น 1 จำนวน 0..4 ตัว จะเปลี่ยนเป็นอะไร) · "
+              "สัญญาณรบกวน p ที่จุดเปลี่ยน · γ/ν · β/ν · ขนาดที่ใช้ (3 ขนาดใหญ่สุดที่มีข้อมูล) · ระดับ · การจัดกลุ่ม", "",
+              "| กฎ | ตาราง | p_c | γ/ν | β/ν | ขนาด | ระดับ | จัดกลุ่ม |", "|---|---|---|---|---|---|---|---|"]
     lines += rows
     lines += ["", "## ข้อควรรู้",
-              "- การจัดกลุ่มเทียบกับ Ising เท่านั้น (γ/ν = 1.75, β/ν = 0.125; เกณฑ์ |ต่าง| < 0.3 และ < 0.07)",
+              "- การจัดกลุ่มเทียบกับ Ising เท่านั้น (γ/ν = 1.75, β/ν = 0.125) ที่ขนาด ≤ 32 ใช้เกณฑ์ |ต่าง| < 0.3 และ < 0.07 "
+              "ที่ขนาดใหญ่กว่านั้นใช้ช่วงความไม่แน่นอน 95%",
               "- เท่าที่ผมทราบ กฎที่สมมาตรแบบนี้คาดว่าจะอยู่ใน Ising class (ข้อเสนอของ Grinstein และคณะ ปี 1985) "
               "ดังนั้นผลที่เข้ากับ Ising คือการค้นพบซ้ำของสิ่งที่รู้แล้ว ไม่ใช่ของใหม่",
-              "- ผู้สมัครที่ \"ไม่เข้ากับ Ising\" ยังไม่ใช่การค้นพบ: อาจเกิดจากขนาดระบบเล็ก (L = 8, 16, 32), "
-              "ข้อมูลไม่พอ หรือลำดับแบบสลับที่ observable ชุดนี้วัดไม่ได้ ต้องตรวจซ้ำและให้มนุษย์ดู",
+              "- ผู้สมัครที่ \"ไม่เข้ากับ Ising\" ยังไม่ใช่การค้นพบ: อาจเกิดจากขนาดระบบ ข้อมูลไม่พอ "
+              "หรือลำดับแบบสลับที่ observable ชุดนี้วัดไม่ได้ ต้องให้มนุษย์ดู",
               "- กฎที่ \"ไม่พบจุดเปลี่ยน\" หมายถึงไม่พบด้วย observable ชุดนี้ ไม่ได้พิสูจน์ว่าไม่มี",
               "- R2 (engine ที่สอง) ทำเฉพาะกฎที่ผ่านการคัดกรอง ที่ L=8", "",
               "## ประวัติการเลือกการทดลอง"]
