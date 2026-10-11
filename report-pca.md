@@ -1,12 +1,12 @@
 # รายงาน Discovery Engine — noisy CA family (32 symmetric rules)
 
-สร้างเมื่อ 2026-10-10 21:56:16 UTC · code `24f8f5e569c8053f`
+สร้างเมื่อ 2026-10-11 05:55:07 UTC · code `24f8f5e569c8053f`
 
 ผลทั้งหมดนี้เป็นผลของ simulation ภายใต้ model และ assumption ด้านล่าง ไม่ใช่กฎของธรรมชาติ
 
 ## สถานะ
-- events 13740 รายการ · hash chain: ผ่าน
-- jobs: done 4578
+- events 13831 รายการ · hash chain: ผ่าน
+- jobs: done 4608
 
 ## สรุปแบบง่าย
 ระบบลองกฎ 32 แบบ (กฎที่สมมาตรเมื่อสลับ 0 กับ 1) แล้วตรวจว่ากฎไหนมีจุดเปลี่ยนสถานะเมื่อเพิ่มสัญญาณรบกวน:
@@ -38,7 +38,7 @@
 |---|---|---|---|
 | 8/16/32 | 0.061 | 1.806 | 0.170 |
 | 16/32/64 | 0.065 | 1.887 | 0.713 |
-| 32/64/128 | 0.058 | 1.650 | 0.380 |
+| 32/64/128 | 0.058 | 1.650 | 0.411 |
 
 **กฎ 24** (00011): ไม่ขัดแย้งกับ Ising ที่ขนาดใหญ่สุด (ช่วงความไม่แน่นอนครอบค่า Ising ทั้งสองค่า; แต่ช่วงยังกว้าง ยืนยันได้ไม่แน่นหนา)
 
@@ -76,7 +76,7 @@
 | 20 | 00101 | 0.107 | -0.408 | 0.970 | 8/16/32 | - | ไม่พบจุดเปลี่ยน |
 | 21 | 10101 | 0.190 | -0.008 | 1.000 | 8/16/32 | - | ไม่พบจุดเปลี่ยน |
 | 22 | 01101 | 0.084 | -0.073 | 1.008 | 8/16/32 | - | ไม่พบจุดเปลี่ยน |
-| 23 | 11101 | 0.058 | 1.650 | 0.380 | 32/64/128 | L2 ชั่วคราว | ไม่ขัดแย้งกับ Ising (ที่ขนาดใหญ่) |
+| 23 | 11101 | 0.058 | 1.650 | 0.411 | 32/64/128 | L2 ชั่วคราว | ไม่ขัดแย้งกับ Ising (ที่ขนาดใหญ่) |
 | 24 | 00011 | 0.137 | 1.844 | 0.755 | 32/64/128 | L2 ชั่วคราว | ไม่ขัดแย้งกับ Ising (ที่ขนาดใหญ่) |
 | 25 | 10011 | 0.104 | 0.080 | 1.007 | 8/16/32 | - | ไม่พบจุดเปลี่ยน |
 | 26 | 01011 | 0.117 | -0.040 | 1.007 | 8/16/32 | - | ไม่พบจุดเปลี่ยน |
@@ -100,3 +100,4 @@
 - stage 4 [noisy CA family (32 symmetric rules)]: finite-size check -> run candidate rules [7, 8, 23, 24] at much larger sizes L=[64, 128] (same noise levels, 3 seeds) to see whether odd exponents are only small-system effects (264 jobs)
 - stage 5 [noisy CA family (32 symmetric rules)]: zoom round 1 -> the peak is narrower than the noise grid at large sizes (12 rule/size pairs, e.g. rule 7 L=32: peak at p=0.1406, grid spacing 0.0120 > 0.0051); finer grid around each peak (432 jobs)
 - stage 6 [noisy CA family (32 symmetric rules)]: zoom round 2 -> the peak is narrower than the noise grid at large sizes (8 rule/size pairs, e.g. rule 7 L=128: peak at p=0.1363, grid spacing 0.0020 > 0.0012); finer grid around each peak (285 jobs)
+- stage 7 [noisy CA family (32 symmetric rules)]: zoom round 3 -> the peak is narrower than the noise grid at large sizes (1 rule/size pairs, e.g. rule 23 L=128: peak at p=0.0582, grid spacing 0.0007 > 0.0005); finer grid around each peak (30 jobs)
