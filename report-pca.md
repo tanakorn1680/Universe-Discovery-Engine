@@ -1,6 +1,6 @@
 # รายงาน Discovery Engine — noisy CA family (32 symmetric rules)
 
-สร้างเมื่อ 2026-10-16 11:30:32 UTC · code `24f8f5e569c8053f`
+สร้างเมื่อ 2026-10-16 16:43:43 UTC · code `24f8f5e569c8053f`
 
 ผลทั้งหมดนี้เป็นผลของ simulation ภายใต้ model และ assumption ด้านล่าง ไม่ใช่กฎของธรรมชาติ
 
